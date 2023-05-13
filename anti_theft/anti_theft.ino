@@ -1,109 +1,116 @@
-#include <Arduino_BMI270_BMM150.h>
+/* Copyright 2019 The TensorFlow Authors. All Rights Reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+==============================================================================*/
 
 #include <TensorFlowLite.h>
-
+#include "Arduino_BMI270_BMM150.h"
 #include "main_functions.h"
 
-#include "model_data.h"
-#include "tensorflow/lite/micro/micro_error_reporter.h"
-#include "tensorflow/lite/micro/kernels/all_ops_resolver.h" //TODO: ersätt
+#include "sine_model_data.h"
+#include "tensorflow/lite/micro/all_ops_resolver.h"
+#include "tensorflow/lite/micro/tflite_bridge/micro_error_reporter.h"
 #include "tensorflow/lite/micro/micro_interpreter.h"
-//#include "tensorflow/lite/micro/micro_mutable_op_resolver.h"
 #include "tensorflow/lite/schema/schema_generated.h"
-#include "tensorflow/lite/version.h"
-#include "tensorflow/lite/c/common.h"
- //accelerometer functions
-//#include "accelerometer_handler.cpp"
 
-
-//Compatability
+// Globals, used for compatibility with Arduino-style sketches.
 namespace {
 tflite::ErrorReporter* error_reporter = nullptr;
 const tflite::Model* model = nullptr;
 tflite::MicroInterpreter* interpreter = nullptr;
 TfLiteTensor* input = nullptr;
-//TfLiteTensor* output = nullptr;
-int inference_count = 0;
+TfLiteTensor* output = nullptr;
+int datapointsRetrieved = 0;
+constexpr int DATAPOINTS_PER_INFERENCE = 420; //Amount of measurements (140) * 3 for x, y and z
+float x,y,z;
 
-constexpr int TENSOR_ARENA_SIZE = 100 * 1024; //Kan behöva justeras för att matcha minnesbehov bättre
-uint8_t tensor_arena[TENSOR_ARENA_SIZE];
-} //namespace
+// Create an area of memory to use for input, output, and intermediate arrays.
+// Finding the minimum value for your model may require some trial and error.
+constexpr int kTensorArenaSize = 100 * 1024;
+uint8_t tensor_arena[kTensorArenaSize];
+}  // namespace
 
-void setup(){
-Serial.begin(9600);
-Serial.println("Hejsan2");
- 
-
-if (!IMU.begin()) {
-    Serial.println("Failed to initialize IMU!");
-    while (1);
-  }
-Serial.println("hej");
+void setup() {
+  // Set up logging
+  // NOLINTNEXTLINE(runtime-global-variables)
   static tflite::MicroErrorReporter micro_error_reporter;
   error_reporter = &micro_error_reporter;
 
+  // Map the model into a usable data structure. This doesn't involve any
+  // copying or parsing, it's a very lightweight operation.
+  model = tflite::GetModel(g_sine_model_data);
 
-  model = tflite::GetModel(model_data);
-  if (model->version() != TFLITE_SCHEMA_VERSION) {
-    TF_LITE_REPORT_ERROR(error_reporter,
-                         "Model provided is schema version %d not equal "
-                         "to supported version %d.",
-                         model->version(), TFLITE_SCHEMA_VERSION);
-    return;
-  }
+  // Replace with micro_ops_resolver?
+  // NOLINTNEXTLINE(runtime-global-variables)
+  static tflite::AllOpsResolver resolver;
 
-  //TODO: Byt ut detta mot MicroOpResolver när vi vet vilka och hur många operationer som används
-  static tflite::ops::micro::AllOpsResolver resolver;
-
-  //static tflite::MicroOpResolver<1> resolver; //byt ettan till antal operationer
-  //resolver.AddBuiltin(tflite::SOME_OPERATION,tflite::ops::micro::SOME_OPERATION());
-
-  static tflite::MicroInterpreter static_interpreter(model, resolver, tensor_arena, TENSOR_ARENA_SIZE, error_reporter);
+  // Build an interpreter to run the model with.
+  static tflite::MicroInterpreter static_interpreter(
+      model, resolver, tensor_arena, kTensorArenaSize);
   interpreter = &static_interpreter;
 
+  // Allocate memory from the tensor_arena for the model's tensors.
   TfLiteStatus allocate_status = interpreter->AllocateTensors();
   if (allocate_status != kTfLiteOk) {
     TF_LITE_REPORT_ERROR(error_reporter, "AllocateTensors() failed");
     return;
   }
-  
-  //In-pointer
+
   input = interpreter->input(0);
-  int input_length = input->bytes / sizeof(float);
-  Serial.println(input_length);
-  //output = interpreter->output(0);
+  output = interpreter->output(0);
 
-// if ((input->dims->size != 4) || (input->dims->data[0] != 1) ||
-//       (input->dims->data[1] != 128) ||
-//       (input->dims->data[2] != kChannelNumber) ||
-//       (input->type != kTfLiteFloat32)) {
-//     TF_LITE_REPORT_ERROR(error_reporter,
-//                          "Bad input tensor parameters in model");
-//     return;
-//   }
+  pinMode(LED_BUILTIN, OUTPUT);
+
+  delay(5000);
 }
 
-void loop(){
-  //TF_LITE_REPORT_ERROR(error_reporter, input->type);TF_LITE_REPORT_ERROR(error_reporter, input->type);
-  TF_LITE_REPORT_ERROR(error_reporter, "Test1");
-  TF_LITE_REPORT_ERROR(error_reporter, (const char*)(input->dims->data[1]));
-  TF_LITE_REPORT_ERROR(error_reporter, (const char*)(input->dims->data[2]));
-  TF_LITE_REPORT_ERROR(error_reporter, "Test2");
-  return;
-  float x,y,z;
+void loop() 
+{
+  IMU.readAcceleration(x,y,z);
+  delay(21) // to collect data evenly over approx. 3 seconds before inference
+  input->data.f[datapointsRetrieved] = x;
+  input->data.f[datapointsRetrieved+1] = y;
+  input->data.f[datapointsRetrieved+2] = z;
+  datapointsRetrieved += 3;
 
-  // Läs accelerometer och lägg det i input-tensor
-  if (IMU.accelerationAvailable()){
-    IMU.readAcceleration(x,y,z); //Måste detta omvandlas till färre dimensioner?
-    input->data.f[0] = x;
-  }
-  //else return;
-
-  // Kör autoencodern
+  // Run inference, and report any error
+  if (datapointsRetrieved >= DATAPOINTS_PER_INFERENCE)
+  {
+    digitalWrite(LED_BUILTIN, HIGH);
+    datapointsRetrieved = 0;
     TfLiteStatus invoke_status = interpreter->Invoke();
-  if (invoke_status != kTfLiteOk) {
-    TF_LITE_REPORT_ERROR(error_reporter, "Invoke failed\n");
-  }
+      if (invoke_status != kTfLiteOk) {
+        TF_LITE_REPORT_ERROR(error_reporter, "Invoke failed!");
+        digitalWrite(LED_BUILTIN, LOW);
+        return;
+      }
+    Serial.println("BEGIN");
+    for (int i=0; i < DATAPOINTS_PER_INFERENCE; i++){
+      Serial.println(output->data.f[i]);
+      delay(5); //To give serial reader on the other side time to read. Might not be needed depending on how serial buffering works?
+    }
 
-  //float value = output->data.f[0];
+    Serial.println("END");
+    digitalWrite(LED_BUILTIN, LOW);
+  }
+ 
+  // Read the predicted y value from the model's output tensor
+  
+  // Output the results. A custom HandleOutput function can be implemented
+  // for each supported hardware target.
+  //HandleOutput(error_reporter, x_val, y_val);
+
+  // Increment the inference_counter, and reset it if we have reached
+  // the total number per cycle
 }
+
