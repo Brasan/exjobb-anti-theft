@@ -12,7 +12,6 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
-
 #include <TensorFlowLite.h>
 #include "Arduino_BMI270_BMM150.h"
 #include "main_functions.h"
@@ -23,6 +22,8 @@ limitations under the License.
 #include "tensorflow/lite/micro/micro_interpreter.h"
 #include "tensorflow/lite/schema/schema_generated.h"
 
+#include <cstdlib>
+
 // Globals, used for compatibility with Arduino-style sketches.
 namespace {
 tflite::ErrorReporter* error_reporter = nullptr;
@@ -32,7 +33,10 @@ TfLiteTensor* input = nullptr;
 TfLiteTensor* output = nullptr;
 int datapointsRetrieved = 0;
 constexpr int DATAPOINTS_PER_INFERENCE = 420; //Amount of measurements (140) * 3 for x, y and z
+constexpr float DIFF_THRESHOLD = 0.13;
 float x,y,z;
+float max, min;
+float originalInput[DATAPOINTS_PER_INFERENCE];
 
 // Create an area of memory to use for input, output, and intermediate arrays.
 // Finding the minimum value for your model may require some trial and error.
@@ -61,7 +65,8 @@ void setup() {
 
   // Allocate memory from the tensor_arena for the model's tensors.
   TfLiteStatus allocate_status = interpreter->AllocateTensors();
-  if (allocate_status != kTfLiteOk) {
+  if (allocate_status != kTfLiteOk) 
+  {
     TF_LITE_REPORT_ERROR(error_reporter, "AllocateTensors() failed");
     return;
   }
@@ -70,47 +75,100 @@ void setup() {
   output = interpreter->output(0);
 
   pinMode(LED_BUILTIN, OUTPUT);
-
+  IMU.begin();
   delay(5000);
 }
 
 void loop() 
 {
-  IMU.readAcceleration(x,y,z);
-  delay(21) // to collect data evenly over approx. 3 seconds before inference
+  if (IMU.accelerationAvailable()){
+    IMU.readAcceleration(x,y,z);
+    x = (x + 0.21) / (2.23 + 0.21);
+    y = (y + 1.18) / (2.23 + 1.18);
+    z = (z + 1.4) / (2.03 + 1.4);
+  }
+  else
+  {
+    return;
+  }
+  // to collect data evenly over approx. 3 seconds before inference
+
   input->data.f[datapointsRetrieved] = x;
   input->data.f[datapointsRetrieved+1] = y;
   input->data.f[datapointsRetrieved+2] = z;
+
+  originalInput[datapointsRetrieved] = x;
+  originalInput[datapointsRetrieved+1] = y;
+  originalInput[datapointsRetrieved+2] = z;
+  
   datapointsRetrieved += 3;
 
+  delay(21);
   // Run inference, and report any error
   if (datapointsRetrieved >= DATAPOINTS_PER_INFERENCE)
   {
-    digitalWrite(LED_BUILTIN, HIGH);
+    Serial.println("BEGININ");
+    for (int i=0; i < DATAPOINTS_PER_INFERENCE; i++)
+    {
+      Serial.println(input->data.f[i]);
+      delay(5);
+    }
+    Serial.println("ENDIN");
     datapointsRetrieved = 0;
-    TfLiteStatus invoke_status = interpreter->Invoke();
-      if (invoke_status != kTfLiteOk) {
+    TfLiteStatus invoke_status = interpreter->Invoke(); //Fill input tensor, then invoke on every single added reading after that for real-time analysis
+      if (invoke_status != kTfLiteOk) 
+      {
         TF_LITE_REPORT_ERROR(error_reporter, "Invoke failed!");
-        digitalWrite(LED_BUILTIN, LOW);
         return;
       }
-    Serial.println("BEGIN");
-    for (int i=0; i < DATAPOINTS_PER_INFERENCE; i++){
+    
+    Serial.println("BEGINOUT");
+    for (int i=0; i < DATAPOINTS_PER_INFERENCE; i++)
+    {
       Serial.println(output->data.f[i]);
       delay(5); //To give serial reader on the other side time to read. Might not be needed depending on how serial buffering works?
     }
+    Serial.println("ENDOUT");
 
-    Serial.println("END");
-    digitalWrite(LED_BUILTIN, LOW);
+    float diffSum {0};
+    float avgDiff {0};
+
+    for (int i=0; i < DATAPOINTS_PER_INFERENCE; i++)
+    {
+      diffSum += std::abs(originalInput[i] - output->data.f[i]);
+    }
+
+    avgDiff = diffSum/DATAPOINTS_PER_INFERENCE;
+    Serial.print("DIFF: ");
+    Serial.println(avgDiff);
+
+
+    if (avgDiff > DIFF_THRESHOLD)
+    {
+      digitalWrite(LED_BUILTIN, HIGH);
+    }
+    else
+    {
+      digitalWrite(LED_BUILTIN, LOW);
+    }
   }
- 
-  // Read the predicted y value from the model's output tensor
-  
-  // Output the results. A custom HandleOutput function can be implemented
-  // for each supported hardware target.
-  //HandleOutput(error_reporter, x_val, y_val);
-
-  // Increment the inference_counter, and reset it if we have reached
-  // the total number per cycle
 }
+
+void printTensor(TfLiteTensor* tensor){
+  for (int i=0; i < DATAPOINTS_PER_INFERENCE; i++){
+    Serial.println(tensor->data.f[i]);
+  }
+}
+
+// float diff(float* input, TfLiteTensor* output){
+//   float diffSum {0};
+//   float diff[DATAPOINTS_PER_INFERENCE];
+
+//   for (int i=0; i < DATAPOINTS_PER_INFERENCE; i++){
+//     diffSum += std::abs(input[i] - output->data.f[i]);
+//   }
+
+//   return diffSum/DATAPOINTS_PER_INFERENCE;
+// }
+
 
